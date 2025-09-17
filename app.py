@@ -1,13 +1,14 @@
-#streamlit ui main entry point
+# app.py
 import streamlit as st
 from detector import detect_objects
 from PIL import Image, ImageDraw
-import json
 from io import BytesIO
-from compressor import selective_compress
+from compressor import selective_compress, selective_compress_learned
 from streamlit_image_comparison import image_comparison
 import cv2
 import numpy as np
+
+st.set_page_config(layout="wide")
 st.title("Dynamic Content Aware Image Compression")
 
 # Step 1: upload img
@@ -18,6 +19,7 @@ if uploaded_file:
     st.image(image, caption="Uploaded Image", use_column_width=True)
     if "original_img" not in st.session_state:
         st.session_state["original_img"] = image
+
     # Step 2: Run object detection
     if st.button("Run Object Detection"):
         detections, annotated_img = detect_objects(image)
@@ -32,6 +34,7 @@ if "detections" in st.session_state:
     detections = st.session_state["detections"]
     options = [f"{det['label']} (conf: {det['confidence']:.2f})" for det in detections]
 
+    # allow multiple selections
     selected_ids = st.multiselect("Choose detected objects:", options)
 
     if selected_ids:
@@ -49,82 +52,81 @@ if "detections" in st.session_state:
         st.image(img_copy, caption="Selected Objects Highlighted", use_column_width=True)
         st.subheader("Compression Settings")
 
-preset = st.radio(
-    "Choose a mode:",
-    [
-        "Balanced Compression (recommended)",
-        "Sharper Faces & Text",
-        "Maximum Size Reduction"
-    ],
-    index=0
-)
+        # Preset choices (keep same UX as your original)
+        preset = st.radio(
+            "Choose a mode:",
+            [
+                "Balanced Compression (recommended)",
+                "Sharper Faces & Text",
+                "Maximum Size Reduction"
+            ],
+            index=0
+        )
 
-# Preset values
-if preset == "Balanced Compression (recommended)":
-    hq_quality, lq_quality, feather = 85, 40, 20
-elif preset == "Sharper Faces & Text":
-    hq_quality, lq_quality, feather = 95, 50, 15
-else:  # Maximum Size Reduction
-    hq_quality, lq_quality, feather = 80, 25, 30
+        # Preset values
+        if preset == "Balanced Compression (recommended)":
+            hq_quality_default, lq_quality_default, feather_default = 85, 40, 20
+        elif preset == "Sharper Faces & Text":
+            hq_quality_default, lq_quality_default, feather_default = 95, 50, 15
+        else:  # Maximum Size Reduction
+            hq_quality_default, lq_quality_default, feather_default = 80, 25, 30
 
-# Optional advanced settings
-with st.expander("⚙️ Advanced Settings"):
-    hq_quality = st.slider("High Quality Area", 70, 100, hq_quality)
-    lq_quality = st.slider("Background Quality", 10, 80, lq_quality)
-    feather = st.slider("Blend Edge Smoothness", 5, 50, feather)
+        # Optional advanced settings (kept exactly as in your original project)
+        with st.expander("⚙️ Advanced Settings"):
+            hq_quality = st.slider("High Quality Area", 70, 100, hq_quality_default)
+            lq_quality = st.slider("Background Quality", 10, 80, lq_quality_default)
+            feather = st.slider("Blend Edge Smoothness", 5, 50, feather_default)
 
-# ------------------ Compression Function ------------------
-def selective_compress(image, hq_q, lq_q, feather):
-    # Convert PIL → OpenCV
-    img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        # ------------------ Run Compression Buttons ------------------
+        # Compute selected boxes
+        selected_boxes = [det["bbox"] for det, opt in zip(detections, options) if opt in selected_ids]
 
-    # Simulate detection mask (for demo, central region)
-    mask = np.zeros(img_cv.shape[:2], np.uint8)
-    h, w = mask.shape
-    cv2.rectangle(mask, (int(w*0.3), int(h*0.3)), (int(w*0.7), int(h*0.7)), 255, -1)
-    mask = cv2.GaussianBlur(mask, (feather|1, feather|1), 0)
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Compress Image (JPEG)"):
+                # call your existing PIL/JPEG-based pipeline
+                out = selective_compress(
+                    st.session_state["original_img"],
+                    selected_boxes,
+                    q_fg=hq_quality,
+                    q_bg=lq_quality,
+                    feather=feather
+                )
+                st.session_state["compression_out"] = out
+                st.session_state["compression_params"] = {
+                    "method": "jpeg",
+                    "hq_q": hq_quality,
+                    "lq_q": lq_quality,
+                    "feather": feather
+                }
 
-    # Encode HQ and LQ layers
-    _, hq_buf = cv2.imencode(".jpg", img_cv, [int(cv2.IMWRITE_JPEG_QUALITY), hq_q])
-    _, lq_buf = cv2.imencode(".jpg", img_cv, [int(cv2.IMWRITE_JPEG_QUALITY), lq_q])
-    hq_img = cv2.imdecode(hq_buf, 1)
-    lq_img = cv2.imdecode(lq_buf, 1)
-
-    # Blend by mask
-    mask_f = mask.astype(float) / 255.0
-    mask_f = cv2.merge([mask_f]*3)
-    blended = (hq_img * mask_f + lq_img * (1-mask_f)).astype(np.uint8)
-
-    return Image.fromarray(cv2.cvtColor(blended, cv2.COLOR_BGR2RGB)), \
-           Image.fromarray(mask), \
-           Image.fromarray(cv2.cvtColor(hq_img, cv2.COLOR_BGR2RGB)), \
-           Image.fromarray(cv2.cvtColor(lq_img, cv2.COLOR_BGR2RGB))
-
-# ------------------ Run Compression ------------------
-if uploaded_file and st.button("Compress Image"):
-    result_img, mask, hq_preview, lq_preview = selective_compress(
-        st.session_state["original_img"], hq_quality, lq_quality, feather
-    )
-    st.session_state["compression_out"] = {
-        "result_img": result_img,
-        "mask": mask,
-        "hq_preview": hq_preview,
-        "lq_preview": lq_preview
-    }
-    st.session_state["compression_params"] = {
-        "hq_q": hq_quality,
-        "lq_q": lq_quality,
-        "feather": feather
-    }
+        with col2:
+            if st.button("Compress Image (Autoencoder)"):
+                # call learned compression pipeline (TensorFlow)
+                try:
+                    out = selective_compress_learned(
+                        st.session_state["original_img"],
+                        selected_boxes,
+                        feather=feather,
+                        q_bg=lq_quality,
+                        final_encode_quality=85
+                    )
+                    st.session_state["compression_out"] = out
+                    st.session_state["compression_params"] = {
+                        "method": "autoencoder",
+                        "feather": feather
+                    }
+                except Exception as e:
+                    st.error(f"Autoencoder compression failed: {e}")
+                    st.info("If you haven't trained/downloaded the autoencoder weights, train in Colab and place the file at models/autoencoder_tf.h5")
 
 # ------------------ Results & Download ------------------
 if "compression_out" in st.session_state:
     out = st.session_state["compression_out"]
-    params = st.session_state["compression_params"]
+    params = st.session_state.get("compression_params", {})
 
     st.subheader("Preview: Before vs After")
 
-    # Before/After slider
     image_comparison(
         img1=st.session_state["original_img"],
         img2=out["result_img"],
