@@ -8,6 +8,9 @@ from compressor import selective_compress
 from streamlit_image_comparison import image_comparison
 import cv2
 import numpy as np
+import os
+import uuid
+from enhancer import enhance_and_blend, DEFAULT_MODEL_PATH
 st.title("Dynamic Content Aware Image Compression")
 
 # Step 1: upload img
@@ -116,7 +119,6 @@ if uploaded_file and st.button("Compress Image"):
         "lq_q": lq_quality,
         "feather": feather
     }
-
 # ------------------ Results & Download ------------------
 if "compression_out" in st.session_state:
     out = st.session_state["compression_out"]
@@ -152,5 +154,61 @@ if "compression_out" in st.session_state:
     st.success(f"✅ Size reduced from {orig_size/1024:.1f} KB → {new_size/1024:.1f} KB "
                f"({100*(1 - new_size/orig_size):.1f}% smaller)")
 
-    st.download_button("⬇️ Download Compressed JPEG", data=data_bytes,
-                       file_name="compressed.jpg", mime="image/jpeg")
+    st.download_button(
+        "⬇️ Download Compressed JPEG",
+        data=data_bytes,
+        file_name=f"compressed_{uuid.uuid4().hex[:8]}.jpg",
+        mime="image/jpeg",
+        key=f"download_compressed_{uuid.uuid4().hex}"
+    )
+    st.markdown("---")
+    st.subheader("Optional: Enhance Compressed Image with GAN")
+
+    # unique key to avoid duplicate widget ids
+    apply_gan = st.checkbox(
+        "Apply GAN Enhancement (use model if present)",
+        value=False,
+        key="apply_gan_after_slider"
+    )
+    enhanced_img = None
+
+    if apply_gan and "compression_out" in st.session_state:
+        out = st.session_state["compression_out"]
+        mask = out["mask"]
+        lq_preview = out["lq_preview"]
+        model_path = DEFAULT_MODEL_PATH
+        st.info(f"Running enhancer (model path: {model_path})")
+
+        try:
+            debug = enhance_and_blend(lq_preview, mask, model_path=model_path, blend=True, return_debug=True)
+            enhanced_img = debug["out"]
+            st.subheader("GAN Enhanced Result")
+            st.image(enhanced_img, use_column_width=True)
+            st.subheader("Per-pixel difference (gray heatmap)")
+            st.image(debug["diff_heat"], use_column_width=True)
+        except Exception as e:
+            st.error(f"Enhancer failed: {e}")
+
+    if enhanced_img is not None:
+        st.session_state["compression_out"]["result_enhanced"] = enhanced_img
+
+        # download enhanced image (unique key)
+        buf_en = BytesIO()
+        enhanced_img.save(buf_en, format="JPEG", quality=85, optimize=True)
+        st.download_button(
+            "⬇️ Download Enhanced JPEG",
+            data=buf_en.getvalue(),
+            file_name=f"enhanced_{uuid.uuid4().hex[:8]}.jpg",
+            mime="image/jpeg",
+            key=f"download_enh_{uuid.uuid4().hex}"
+        )
+
+        # enhanced vs compressed comparison
+        st.subheader("Enhanced vs Compressed Comparison")
+        image_comparison(
+            img1=out["result_img"],
+            img2=enhanced_img,
+            label1="Compressed",
+            label2="GAN Enhanced",
+            width=700
+        )
